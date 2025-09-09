@@ -7,10 +7,10 @@
     "start": "node server.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "Richard Musya",
   "license": "ISC",
   "dependencies": {
-    "node-fetch": "^3.3.2"
+    
   },
   "description": ""
 }
