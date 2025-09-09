@@ -1,41 +1,46 @@
-// api/send-email.js
-import nodemailer from "nodemailer";
+const nodemailer = require('nodemailer');
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  const { name, email, message } = req.body;
+
+  // Input validation
+  if (!name || !email || !message) {
+    return res.status(400).json({ error: 'All fields are required' });
+  }
+
+  // Create transporter
+  const transporter = nodemailer.createTransporter({
+    service: 'gmail', // or any other service
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+  });
+
+  // Email content
+  const mailOptions = {
+    from: email,
+    to: 'richardmusya9@gmail.com', // Your email address
+    subject: `New Contact Form Message from ${name}`,
+    text: `Name: ${name}\nEmail: ${email}\nMessage: ${message}`,
+    html: `
+      <h3>New Contact Form Message</h3>
+      <p><strong>Name:</strong> ${name}</p>
+      <p><strong>Email:</strong> ${email}</p>
+      <p><strong>Message:</strong></p>
+      <p>${message.replace(/\n/g, '<br>')}</p>
+    `,
+  };
+
   try {
-    const { name, email, message } = req.body;
-
-    if (!name || !email || !message) {
-      return res.status(400).json({ error: "All fields are required." });
-    }
-
-    // Configure transporter using environment variables
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST, // e.g. "smtp.gmail.com"
-      port: process.env.SMTP_PORT, // e.g. 465 or 587
-      secure: process.env.SMTP_SECURE === "true", // true for 465, false for 587
-      auth: {
-        user: process.env.SMTP_USER, // your email
-        pass: process.env.SMTP_PASS, // your app password
-      },
-    });
-
-    await transporter.sendMail({
-      from: `"Tseikuru Times" <${process.env.SMTP_USER}>`,
-      to: process.env.CONTACT_EMAIL, // where messages should be sent
-      subject: `New Contact Form Message from ${name}`,
-      text: `From: ${name} <${email}>\n\n${message}`,
-      html: `<p><strong>From:</strong> ${name} &lt;${email}&gt;</p>
-             <p>${message}</p>`,
-    });
-
-    return res.status(200).json({ success: true });
-  } catch (err) {
-    console.error("Email error:", err);
-    return res.status(500).json({ error: "Failed to send email." });
+    await transporter.sendMail(mailOptions);
+    res.status(200).json({ message: 'Email sent successfully' });
+  } catch (error) {
+    console.error('Error sending email:', error);
+    res.status(500).json({ error: 'Failed to send email' });
   }
 }
