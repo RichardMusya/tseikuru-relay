@@ -1,129 +1,142 @@
-// /api/send-email.js
-const mailgun = require("mailgun-js");
+// api/send-email.js
+import nodemailer from 'nodemailer';
+import { google } from 'googleapis';
 
-module.exports = async (req, res) => {
-  // Set CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+const OAuth2 = google.auth.OAuth2;
 
-  // Handle preflight request
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+const ONE_MINUTE = 60 * 1000;
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ 
-      error: 'Method not allowed',
-      message: 'Only POST requests are accepted' 
+// read env
+const {
+  GMAIL_USER,             // email address that will send (e.g. youraccount@gmail.com)
+  RECIPIENT_EMAIL,        // where messages are delivered (your Gmail)
+  USE_APP_PASSWORD,       // set 'true' to use APP password mode instead of OAuth2
+  GMAIL_APP_PASSWORD,     // app password (if using app password mode)
+  GMAIL_CLIENT_ID,
+  GMAIL_CLIENT_SECRET,
+  GMAIL_REFRESH_TOKEN,
+  FORM_SERVER_SECRET,     // optional secret header expected from client
+} = process.env;
+
+const jsonResponse = (res, status, payload) => {
+  res.status(status).json(payload);
+};
+
+const createTransporter = async () => {
+  if (USE_APP_PASSWORD === 'true') {
+    if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
+      throw new Error('Missing GMAIL_USER or GMAIL_APP_PASSWORD for app-password mode.');
+    }
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: GMAIL_USER,
+        pass: GMAIL_APP_PASSWORD,
+      },
     });
   }
 
+  // OAuth2 mode
+  if (!GMAIL_CLIENT_ID || !GMAIL_CLIENT_SECRET || !GMAIL_REFRESH_TOKEN || !GMAIL_USER) {
+    throw new Error('Missing OAuth2 environment variables.');
+  }
+
+  const oAuth2Client = new OAuth2(
+    GMAIL_CLIENT_ID,
+    GMAIL_CLIENT_SECRET,
+    'https://developers.google.com/oauthplayground' // redirect (not used here)
+  );
+
+  oAuth2Client.setCredentials({
+    refresh_token: GMAIL_REFRESH_TOKEN,
+  });
+
+  // Get access token (nodemailer can accept the getAccessToken function)
+  const accessToken = await new Promise((resolve, reject) => {
+    oAuth2Client.getAccessToken((err, token) => {
+      if (err) return reject(err);
+      resolve(token);
+    });
+  });
+
+  return nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      type: 'OAuth2',
+      user: GMAIL_USER,
+      clientId: GMAIL_CLIENT_ID,
+      clientSecret: GMAIL_CLIENT_SECRET,
+      refreshToken: GMAIL_REFRESH_TOKEN,
+      accessToken,
+    },
+  });
+};
+
+export default async function handler(req, res) {
   try {
-    const { name, email, message, subject } = req.body;
-
-    // Validate input
-    if (!name || !email || !message) {
-      return res.status(400).json({ 
-        error: 'Missing required fields',
-        message: 'Name, email, and message are required' 
-      });
+    if (req.method !== 'POST') {
+      return jsonResponse(res, 405, { error: 'Method not allowed' });
     }
 
-    // Validate email format
+    // Optional: check simple shared secret header to reduce abuse
+    if (FORM_SERVER_SECRET) {
+      const headerSecret = req.headers['x-form-secret'];
+      if (!headerSecret || headerSecret !== FORM_SERVER_SECRET) {
+        return jsonResponse(res, 401, { error: 'Unauthorized' });
+      }
+    }
+
+    const { name, email, message, subject } = req.body || {};
+
+    // Basic validation
+    if (
+      !name ||
+      !email ||
+      !message ||
+      typeof name !== 'string' ||
+      typeof email !== 'string' ||
+      typeof message !== 'string'
+    ) {
+      return jsonResponse(res, 400, { error: 'Missing required fields: name, email, message' });
+    }
+
+    const trimmedName = name.trim();
+    const trimmedEmail = email.trim().toLowerCase();
+    const trimmedMessage = message.trim();
+    const mailSubject = (subject && String(subject).trim()) || `Contact from ${trimmedName}`;
+
+    // simple email regex
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ 
-        error: 'Invalid email format',
-        message: 'Please provide a valid email address' 
-      });
+    if (!emailRegex.test(trimmedEmail)) {
+      return jsonResponse(res, 400, { error: 'Invalid email' });
     }
 
-    // Check if Mailgun credentials are configured
-    if (!process.env.MAILGUN_API_KEY || !process.env.MAILGUN_DOMAIN) {
-      console.error('Mailgun credentials not configured');
-      return res.status(500).json({ 
-        error: 'Server configuration error',
-        message: 'Email service is not properly configured. Please try again later.' 
-      });
-    }
+    const transporter = await createTransporter();
 
-    // Initialize Mailgun
-    const mg = mailgun({
-      apiKey: process.env.MAILGUN_API_KEY,
-      domain: process.env.MAILGUN_DOMAIN
-    });
+    const htmlBody = `
+      <p><strong>From:</strong> ${trimmedName} &lt;${trimmedEmail}&gt;</p>
+      <p><strong>Subject:</strong> ${mailSubject}</p>
+      <p><strong>Message:</strong></p>
+      <div style="white-space:pre-wrap;border-left:4px solid #ddd;padding-left:10px;">${trimmedMessage}</div>
+      <hr/>
+      <p>Sent via Tseikuru Times contact form.</p>
+    `;
 
-    // Determine recipient email
-    const toEmail = process.env.TO_EMAIL || 'richardmusya9@gmail.com';
-
-    // Email data
-    const emailData = {
-      from: `${name} <${email}>`,
-      to: toEmail,
-      subject: subject || `New Contact Form Message from ${name}`,
-      text: `
-Name: ${name}
-Email: ${email}
-Message: ${message}
-
-Sent from Tseikuru Times Contact Form
-      `,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #e60026;">New Contact Form Submission - Tseikuru Times</h2>
-          <div style="background-color: #f9f9f9; padding: 20px; border-radius: 8px;">
-            <p><strong>Name:</strong> ${name}</p>
-            <p><strong>Email:</strong> <a href="mailto:${email}">${email}</a></p>
-            <p><strong>Message:</strong></p>
-            <div style="background-color: white; padding: 15px; border-left: 4px solid #e60026; margin: 10px 0;">
-              ${message.replace(/\n/g, '<br>')}
-            </div>
-          </div>
-          <p style="color: #666; font-size: 14px; margin-top: 20px;">
-            Sent from Tseikuru Times Contact Form on ${new Date().toLocaleString()}
-          </p>
-        </div>
-      `
+    const mailOptions = {
+      from: `"${trimmedName}" <${GMAIL_USER}>`, // from the server's gmail user, display sender name
+      to: RECIPIENT_EMAIL || GMAIL_USER, // deliver to configured recipient
+      subject: mailSubject,
+      text: `${trimmedMessage}\n\nFrom: ${trimmedName} <${trimmedEmail}>`,
+      html: htmlBody,
+      replyTo: trimmedEmail, // convenient to reply directly to user's email
     };
 
-    // Send email using Promise-based approach
-    const result = await new Promise((resolve, reject) => {
-      mg.messages().send(emailData, (error, body) => {
-        if (error) {
-          reject(error);
-        } else {
-          resolve(body);
-        }
-      });
-    });
+    // send mail
+    await transporter.sendMail(mailOptions);
 
-    console.log('Email sent successfully:', result);
-    
-    res.status(200).json({ 
-      success: true, 
-      message: 'Email sent successfully',
-      id: result.id 
-    });
-
-  } catch (error) {
-    console.error('Mailgun error:', error);
-    
-    // Provide more specific error messages
-    let errorMessage = 'Failed to send email. Please try again later.';
-    
-    if (error.message.includes('Forbidden')) {
-      errorMessage = 'Email service authentication failed.';
-    } else if (error.message.includes('Domain not found')) {
-      errorMessage = 'Email service configuration error.';
-    } else if (error.message.includes('Network')) {
-      errorMessage = 'Network error. Please check your connection.';
-    }
-    
-    res.status(500).json({ 
-      error: 'Email sending failed',
-      message: errorMessage,
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    return jsonResponse(res, 200, { ok: true });
+  } catch (err) {
+    console.error('send-email error:', err);
+    return jsonResponse(res, 500, { error: 'Server error sending email' });
   }
-};
+}
